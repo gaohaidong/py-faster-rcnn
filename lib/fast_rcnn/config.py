@@ -37,6 +37,9 @@ __C.TRAIN = edict()
 # Each scale is the pixel size of an image's shortest side
 __C.TRAIN.SCALES = (600,)
 
+# Resize test images so that its width and height are multiples of ...
+__C.TRAIN.SCALE_MULTIPLE_OF = 1
+
 # Max pixel size of the longest side of a scaled input image
 __C.TRAIN.MAX_SIZE = 1000
 
@@ -134,6 +137,9 @@ __C.TEST = edict()
 # Each scale is the pixel size of an image's shortest side
 __C.TEST.SCALES = (600,)
 
+# Resize test images so that its width and height are multiples of ...
+__C.TEST.SCALE_MULTIPLE_OF = 1
+
 # Max pixel size of the longest side of a scaled input image
 __C.TEST.MAX_SIZE = 1000
 
@@ -162,6 +168,13 @@ __C.TEST.RPN_PRE_NMS_TOP_N = 6000
 __C.TEST.RPN_POST_NMS_TOP_N = 300
 # Proposal height and width both need to be greater than RPN_MIN_SIZE (at orig image scale)
 __C.TEST.RPN_MIN_SIZE = 16
+
+# Apply bounding box voting
+__C.TEST.BBOX_VOTE = False
+
+# Apply box scoring heuristics
+__C.TEST.BBOX_VOTE_N_WEIGHTED_SCORE = 1
+__C.TEST.BBOX_VOTE_WEIGHT_EMPTY = 0.5
 
 
 #

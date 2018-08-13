@@ -18,6 +18,8 @@ from fast_rcnn.nms_wrapper import nms
 import cPickle
 from utils.blob import im_list_to_blob
 import os
+from utils.cython_bbox import bbox_overlaps
+
 
 def _get_image_blob(im):
     """Converts an image into a network input.
@@ -45,9 +47,13 @@ def _get_image_blob(im):
         # Prevent the biggest axis from being more than MAX_SIZE
         if np.round(im_scale * im_size_max) > cfg.TEST.MAX_SIZE:
             im_scale = float(cfg.TEST.MAX_SIZE) / float(im_size_max)
-        im = cv2.resize(im_orig, None, None, fx=im_scale, fy=im_scale,
+
+        # Make width and height be multiples of a specified number
+        im_scale_x = np.floor(im.shape[1] * im_scale / cfg.TEST.SCALE_MULTIPLE_OF) * cfg.TEST.SCALE_MULTIPLE_OF / im.shape[1]
+        im_scale_y = np.floor(im.shape[0] * im_scale / cfg.TEST.SCALE_MULTIPLE_OF) * cfg.TEST.SCALE_MULTIPLE_OF / im.shape[0]
+        im = cv2.resize(im_orig, None, None, fx=im_scale_x, fy=im_scale_y,
                         interpolation=cv2.INTER_LINEAR)
-        im_scale_factors.append(im_scale)
+        im_scale_factors.append(np.array([im_scale_x, im_scale_y, im_scale_x, im_scale_y]))
         processed_ims.append(im)
 
     # Create a blob to hold the input images
@@ -105,7 +111,7 @@ def _get_blobs(im, rois):
         blobs['rois'] = _get_rois_blob(rois, im_scale_factors)
     return blobs, im_scale_factors
 
-def im_detect(net, im, boxes=None):
+def im_detect(net, im, _t=None, boxes=None):
     """Detect object classes in an image given object proposals.
 
     Arguments:
@@ -118,6 +124,8 @@ def im_detect(net, im, boxes=None):
             background as object category 0)
         boxes (ndarray): R x (4*K) array of predicted bounding boxes
     """
+    if _t:
+        _t['im_preproc'].tic()
     blobs, im_scales = _get_blobs(im, boxes)
 
     # When mapping from image ROIs to feature map ROIs, there's some aliasing
@@ -135,7 +143,7 @@ def im_detect(net, im, boxes=None):
     if cfg.TEST.HAS_RPN:
         im_blob = blobs['data']
         blobs['im_info'] = np.array(
-            [[im_blob.shape[2], im_blob.shape[3], im_scales[0]]],
+            [np.hstack((im_blob.shape[2], im_blob.shape[3], im_scales[0]))],
             dtype=np.float32)
 
     # reshape network inputs
@@ -146,13 +154,26 @@ def im_detect(net, im, boxes=None):
         net.blobs['rois'].reshape(*(blobs['rois'].shape))
 
     # do forward
-    forward_kwargs = {'data': blobs['data'].astype(np.float32, copy=False)}
+    net.blobs['data'].data[...] = blobs['data']
+    #forward_kwargs = {'data': blobs['data'].astype(np.float32, copy=False)}
     if cfg.TEST.HAS_RPN:
-        forward_kwargs['im_info'] = blobs['im_info'].astype(np.float32, copy=False)
+        net.blobs['im_info'].data[...] = blobs['im_info']
+        #forward_kwargs['im_info'] = blobs['im_info'].astype(np.float32, copy=False)
     else:
-        forward_kwargs['rois'] = blobs['rois'].astype(np.float32, copy=False)
-    blobs_out = net.forward(**forward_kwargs)
+        net.blobs['rois'].data[...] = blobs['rois']
+        #forward_kwargs['rois'] = blobs['rois'].astype(np.float32, copy=False)
+    if _t:
+        _t['im_preproc'].toc()
 
+    if _t:
+        _t['im_net'].tic()
+    blobs_out = net.forward()
+    if _t:
+        _t['im_net'].toc()
+    #blobs_out = net.forward(**forward_kwargs)
+
+    if _t:
+        _t['im_postproc'].tic()
     if cfg.TEST.HAS_RPN:
         assert len(im_scales) == 1, "Only single-image batch implemented"
         rois = net.blobs['rois'].data.copy()
@@ -180,6 +201,8 @@ def im_detect(net, im, boxes=None):
         # Map scores and predictions back to the original set of boxes
         scores = scores[inv_index, :]
         pred_boxes = pred_boxes[inv_index, :]
+    if _t:
+        _t['im_postproc'].toc()
 
     return scores, pred_boxes
 
@@ -224,7 +247,44 @@ def apply_nms(all_boxes, thresh):
             nms_boxes[cls_ind][im_ind] = dets[keep, :].copy()
     return nms_boxes
 
-def test_net(net, imdb, max_per_image=100, thresh=0.05, vis=False):
+def bbox_vote(dets_NMS, dets_all, thresh=0.5):
+    dets_voted = np.zeros_like(dets_NMS)   # Empty matrix with the same shape and type
+
+    _overlaps = bbox_overlaps(
+			np.ascontiguousarray(dets_NMS[:, 0:4], dtype=np.float),
+			np.ascontiguousarray(dets_all[:, 0:4], dtype=np.float))
+
+    # for each survived box
+    for i, det in enumerate(dets_NMS):
+        dets_overlapped = dets_all[np.where(_overlaps[i, :] >= thresh)[0]]
+        assert(len(dets_overlapped) > 0)
+
+        boxes = dets_overlapped[:, 0:4]
+        scores = dets_overlapped[:, 4]
+
+        out_box = np.dot(scores, boxes)
+
+        dets_voted[i][0:4] = out_box / sum(scores)        # Weighted bounding boxes
+        dets_voted[i][4] = det[4]                         # Keep the original score
+
+        # Weighted scores (if enabled)
+        if cfg.TEST.BBOX_VOTE_N_WEIGHTED_SCORE > 1:
+            n_agreement = cfg.TEST.BBOX_VOTE_N_WEIGHTED_SCORE
+            w_empty = cfg.TEST.BBOX_VOTE_WEIGHT_EMPTY
+
+            n_detected = len(scores)
+
+            if n_detected >= n_agreement:
+                top_scores = -np.sort(-scores)[:n_agreement]
+                new_score = np.average(top_scores)
+            else:
+                new_score = np.average(scores) * (n_detected * 1.0 + (n_agreement - n_detected) * w_empty) / n_agreement
+
+            dets_voted[i][4] = min(new_score, dets_voted[i][4])
+
+    return dets_voted
+
+def test_net(net, imdb, max_per_image=100, thresh=0.01, vis=False):
     """Test a Fast R-CNN network on an image database."""
     num_images = len(imdb.image_index)
     # all detections are collected into:
@@ -236,7 +296,7 @@ def test_net(net, imdb, max_per_image=100, thresh=0.05, vis=False):
     output_dir = get_output_dir(imdb, net)
 
     # timers
-    _t = {'im_detect' : Timer(), 'misc' : Timer()}
+    _t = {'im_preproc': Timer(), 'im_net' : Timer(), 'im_postproc': Timer(), 'misc' : Timer()}
 
     if not cfg.TEST.HAS_RPN:
         roidb = imdb.roidb
@@ -254,9 +314,7 @@ def test_net(net, imdb, max_per_image=100, thresh=0.05, vis=False):
             box_proposals = roidb[i]['boxes'][roidb[i]['gt_classes'] == 0]
 
         im = cv2.imread(imdb.image_path_at(i))
-        _t['im_detect'].tic()
-        scores, boxes = im_detect(net, im, box_proposals)
-        _t['im_detect'].toc()
+        scores, boxes = im_detect(net, im, _t, box_proposals)
 
         _t['misc'].tic()
         # skip j = 0, because it's the background class
@@ -267,7 +325,13 @@ def test_net(net, imdb, max_per_image=100, thresh=0.05, vis=False):
             cls_dets = np.hstack((cls_boxes, cls_scores[:, np.newaxis])) \
                 .astype(np.float32, copy=False)
             keep = nms(cls_dets, cfg.TEST.NMS)
-            cls_dets = cls_dets[keep, :]
+
+            dets_NMSed = cls_dets[keep, :]
+            if cfg.TEST.BBOX_VOTE:
+                cls_dets = bbox_vote(dets_NMSed, cls_dets)
+            else:
+                cls_dets = dets_NMSed
+
             if vis:
                 vis_detections(im, imdb.classes[j], cls_dets)
             all_boxes[j][i] = cls_dets
@@ -283,8 +347,9 @@ def test_net(net, imdb, max_per_image=100, thresh=0.05, vis=False):
                     all_boxes[j][i] = all_boxes[j][i][keep, :]
         _t['misc'].toc()
 
-        print 'im_detect: {:d}/{:d} {:.3f}s {:.3f}s' \
-              .format(i + 1, num_images, _t['im_detect'].average_time,
+        print 'im_detect: {:d}/{:d}  net {:.3f}s  preproc {:.3f}s  postproc {:.3f}s  misc {:.3f}s' \
+              .format(i + 1, num_images, _t['im_net'].average_time,
+                      _t['im_preproc'].average_time, _t['im_postproc'].average_time,
                       _t['misc'].average_time)
 
     det_file = os.path.join(output_dir, 'detections.pkl')
