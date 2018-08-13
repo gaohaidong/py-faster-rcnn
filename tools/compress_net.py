@@ -58,6 +58,62 @@ def compress_weights(W, l):
     L = np.dot(np.diag(sl), Vl)
     return Ul, L
 
+def compress_conv_layer(net, net_svd, out, layer_name, svd_layer_name_L='', svd_layer_name_U=''):
+    if svd_layer_name_L == '':
+        svd_layer_name_L = layer_name + '_L'
+    if svd_layer_name_U == '':
+        svd_layer_name_U = layer_name + '_U'
+    if net_svd.params.has_key(svd_layer_name_L):
+        l_conv = net_svd.params['svd_layer_name_L'][0].data.shape[0]
+        print('  {} bottleneck size: {}'.format(svd_layer_name_L, l_conv))
+
+        # uncompressed weights and biases
+        W_conv = net.params[layer_name][0].data
+        B_conv = net.params[layer_name][1].data
+        W_conv = W_conv.reshape(W_conv.shape[0], -1)
+
+        print('  compressing {}...'.format(layer_name))
+        Ul_conv, L_conv = compress_weights(W_conv, l_conv)
+
+        # assert(len(net_svd.params['svd_layer_name_L']) == 1)
+
+        # install compressed matrix factors (and original biases)
+        net_svd.params[svd_layer_name_L][0].data[...] = L_conv.reshape(net_svd.params[svd_layer_name_L][0].data.shape)
+
+        net_svd.params[svd_layer_name_U][0].data[...] = Ul_conv.reshape(net_svd.params[svd_layer_name_U][0].data.shape)
+        net_svd.params[svd_layer_name_U][1].data[...] = B_conv
+
+        out += '_{}_{}'.format(layer_name, l_conv)
+    return out
+
+def compress_fc_layer(net, net_svd, out, layer_name, svd_layer_name_L='', svd_layer_name_U=''):
+    if svd_layer_name_L == '':
+        svd_layer_name_L = layer_name + '_L'
+    if svd_layer_name_U == '':
+        svd_layer_name_U = layer_name + '_U'
+
+    if net_svd.params.has_key(svd_layer_name_L):
+        l_fc = net_svd.params[svd_layer_name_L][0].data.shape[0]
+        print('  {} bottleneck size: {}'.format(svd_layer_name_L, l_fc))
+
+        # uncompressed weights and biases
+        W_fc = net.params[layer_name][0].data
+        B_fc = net.params[layer_name][1].data
+
+        print('  compressing {}...'.format(layer_name))
+        Ul_fc, L_fc = compress_weights(W_fc, l_fc)
+
+        # assert(len(net_svd.params[svd_layer_name_L]) == 1)
+
+        # install compressed matrix factors (and original biases)
+        net_svd.params[svd_layer_name_L][0].data[...] = L_fc
+
+        net_svd.params[svd_layer_name_U][0].data[...] = Ul_fc
+        net_svd.params[svd_layer_name_U][1].data[...] = B_fc
+
+        out += '_{}_{}'.format(layer_name, l_fc)
+    return out
+
 def main():
     args = parse_args()
 
@@ -75,47 +131,16 @@ def main():
     out = os.path.splitext(os.path.basename(args.caffemodel))[0] + '_svd'
     out_dir = os.path.dirname(args.caffemodel)
 
-    # Compress fc6
-    if net_svd.params.has_key('fc6_L'):
-        l_fc6 = net_svd.params['fc6_L'][0].data.shape[0]
-        print('  fc6_L bottleneck size: {}'.format(l_fc6))
+    # Compress conv layers
+    conv_names = ['conv{}_{}'.format(i, j) for i in [4, 5] for j in [1, 2, 3]]
+    for conv_name in conv_names:
+        out = compress_conv_layer(net, net_svd, out, conv_name)
 
-        # uncompressed weights and biases
-        W_fc6 = net.params['fc6'][0].data
-        B_fc6 = net.params['fc6'][1].data
 
-        print('  compressing fc6...')
-        Ul_fc6, L_fc6 = compress_weights(W_fc6, l_fc6)
-
-        assert(len(net_svd.params['fc6_L']) == 1)
-
-        # install compressed matrix factors (and original biases)
-        net_svd.params['fc6_L'][0].data[...] = L_fc6
-
-        net_svd.params['fc6_U'][0].data[...] = Ul_fc6
-        net_svd.params['fc6_U'][1].data[...] = B_fc6
-
-        out += '_fc6_{}'.format(l_fc6)
-
-    # Compress fc7
-    if net_svd.params.has_key('fc7_L'):
-        l_fc7 = net_svd.params['fc7_L'][0].data.shape[0]
-        print '  fc7_L bottleneck size: {}'.format(l_fc7)
-
-        W_fc7 = net.params['fc7'][0].data
-        B_fc7 = net.params['fc7'][1].data
-
-        print('  compressing fc7...')
-        Ul_fc7, L_fc7 = compress_weights(W_fc7, l_fc7)
-
-        assert(len(net_svd.params['fc7_L']) == 1)
-
-        net_svd.params['fc7_L'][0].data[...] = L_fc7
-
-        net_svd.params['fc7_U'][0].data[...] = Ul_fc7
-        net_svd.params['fc7_U'][1].data[...] = B_fc7
-
-        out += '_fc7_{}'.format(l_fc7)
+    # Compress fc layers
+    fc_names = ['fc{}'.format(i) for i in [6, 7]]
+    for fc_name in fc_names:
+        out = compress_fc_layer(net, net_svd, out, fc_name)
 
     filename = '{}/{}.caffemodel'.format(out_dir, out)
     net_svd.save(filename)
