@@ -100,7 +100,8 @@ If you want to cite this work in your publication:
     cd $FRCN_ROOT
     ./tools/test_pvanet.py
     ```
-
+training using online hard example mining
+http://manutdzou.github.io/2016/10/18/Training-Faster-RCNN-with-Online-Hard-Example-Mining.html
 ### How to test on the VOC dataset
 
 1. Download PASCAL VOC 2007 and 2012
